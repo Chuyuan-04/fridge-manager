@@ -4,13 +4,18 @@ import IngredientCard from "./IngredientCard";
 import { getDaysLeft, getTodayDate } from "../utils/dateUtils";
 import { useDroppable } from "@dnd-kit/core";
 
-// ---------- helpers ----------
 function calcExpiresAt(purchaseDate, shelfLife) {
   if (!purchaseDate || typeof shelfLife !== "number") return "";
   const d = new Date(purchaseDate);
   if (Number.isNaN(d.getTime())) return "";
   d.setDate(d.getDate() + shelfLife);
-  return d.toISOString().split("T")[0]; // YYYY-MM-DD
+  return d.toISOString().split("T")[0];
+}
+
+function normStorage(s) {
+  if (!s) return "fridge";
+  if (s === "room") return "pantry";
+  return s;
 }
 
 function FridgePanel({
@@ -20,73 +25,114 @@ function FridgePanel({
   setIngredients,
   onBack,
 }) {
-  const { setNodeRef: setDropRef, isOver } = useDroppable({
-    id: storageFilter || "fridge",
-  });
+  const storageId = storageFilter || "fridge";
 
-  // 当前面板数据
+  const { setNodeRef: setDropRef, isOver } = useDroppable({ id: storageId });
+
   const filteredIngredients = useMemo(() => {
-    if (!storageFilter) return ingredients;
-    return ingredients.filter((i) => (i.storage || "fridge") === storageFilter);
+    if (!storageFilter) return ingredients || [];
+    return (ingredients || []).filter(
+      (i) => normStorage(i.storage) === storageFilter
+    );
   }, [ingredients, storageFilter]);
 
-  /**
-   * ✅ 聚合规则（你要的逻辑）：
-   * 只有 name + storage + unit + expiresAt(到期日) 完全一致才合并
-   */
   const aggregated = useMemo(() => {
     const map = new Map();
 
     for (const it of filteredIngredients) {
       const name = it.name;
-      const storage = it.storage || storageFilter || "fridge";
+      const storage = normStorage(it.storage || storageFilter || "fridge");
       const unit = it.unit || "";
       const shelfLife = typeof it.shelfLife === "number" ? it.shelfLife : 7;
 
-      const expiresAt = calcExpiresAt(it.purchaseDate, shelfLife);
-      const key = `${name}__${storage}__${unit}__${expiresAt}`;
+      const expiresAt =
+        storage === "freezer" ? "" : calcExpiresAt(it.purchaseDate, shelfLife);
+
+      const key =
+        storage === "freezer"
+          ? `${name}__${storage}__${unit}`
+          : `${name}__${storage}__${unit}__${expiresAt}`;
 
       if (!map.has(key)) {
-        map.set(key, { ...it, storage, unit, shelfLife, _expiresAt: expiresAt, _aggKey: key });
-      } else {
-        const prev = map.get(key);
-        const amount = (Number(prev.amount) || 0) + (Number(it.amount) || 0);
-
-        // 展示用：选更早过期的一条作为代表（其实 key 已经同到期日，这里只是稳妥）
-        const prevDays = getDaysLeft(prev.purchaseDate, prev.shelfLife, prev.storage);
-        const itDays = getDaysLeft(it.purchaseDate, it.shelfLife, it.storage);
-        const pick = itDays < prevDays ? it : prev;
-
         map.set(key, {
-          ...pick,
-          amount,
+          ...it,
           storage,
           unit,
           shelfLife,
           _expiresAt: expiresAt,
           _aggKey: key,
         });
+      } else {
+        const prev = map.get(key);
+        const amount = (Number(prev.amount) || 0) + (Number(it.amount) || 0);
+
+        if (storage !== "freezer") {
+          const prevDays = getDaysLeft(
+            prev.purchaseDate,
+            prev.shelfLife,
+            prev.storage
+          );
+          const itDays = getDaysLeft(it.purchaseDate, it.shelfLife, it.storage);
+          const pick = itDays < prevDays ? it : prev;
+          map.set(key, {
+            ...pick,
+            amount,
+            storage,
+            unit,
+            shelfLife,
+            _expiresAt: expiresAt,
+            _aggKey: key,
+          });
+        } else {
+          map.set(key, {
+            ...prev,
+            amount,
+            storage,
+            unit,
+            shelfLife: prev.shelfLife ?? 9999,
+            _expiresAt: "",
+            _aggKey: key,
+          });
+        }
       }
     }
 
-    return Array.from(map.values());
+    const arr = Array.from(map.values());
+
+    // ✅ 排序规则
+    if (storageFilter === "fridge") {
+      arr.sort((a, b) => {
+        const an = (a.name || "").localeCompare(b.name || "", "zh");
+        if (an !== 0) return an;
+        const ae = a._expiresAt || "9999-99-99";
+        const be = b._expiresAt || "9999-99-99";
+        return ae.localeCompare(be);
+      });
+    } else if (storageFilter === "freezer") {
+      arr.sort((a, b) => (a.name || "").localeCompare(b.name || "", "zh"));
+    } else {
+      arr.sort(
+        (a, b) =>
+          getDaysLeft(a.purchaseDate, a.shelfLife, a.storage) -
+          getDaysLeft(b.purchaseDate, b.shelfLife, b.storage)
+      );
+    }
+
+    return arr;
   }, [filteredIngredients, storageFilter]);
 
-  /**
-   * ✅ 加减逻辑：对“同一批次”（同到期日）加减
-   */
   const updateAmount = (aggItem, delta) => {
     const name = aggItem.name;
-    const storage = aggItem.storage || storageFilter || "fridge";
+    const storage = normStorage(aggItem.storage || storageFilter || "fridge");
     const unit = aggItem.unit || "个";
     const shelfLife = typeof aggItem.shelfLife === "number" ? aggItem.shelfLife : 7;
-    const expiresAt = aggItem._expiresAt || calcExpiresAt(aggItem.purchaseDate, shelfLife);
+    const expiresAt =
+      aggItem._expiresAt || calcExpiresAt(aggItem.purchaseDate, shelfLife);
 
     setIngredients((prev) => {
-      const list = [...prev];
+      const list = [...(prev || [])];
 
       if (delta > 0) {
-        // ✅ 补充：新增一条“今天买的”同类（自然有自己的到期日）
         list.push({
           id: Date.now() + Math.random(),
           name,
@@ -94,33 +140,26 @@ function FridgePanel({
           unit,
           purchaseDate: getTodayDate(),
           storage,
-          shelfLife,
+          shelfLife: storage === "freezer" ? 9999 : shelfLife,
           baseShelfLife: aggItem.baseShelfLife,
         });
         return list;
       }
 
-      // ✅ 用了：只扣“同到期日”的那一批里最早过期的记录
       const candidates = list
         .map((it, idx) => ({ it, idx }))
         .filter(({ it }) => {
-          const itStorage = it.storage || "fridge";
+          const itStorage = normStorage(it.storage || "fridge");
           const itUnit = it.unit || "";
+          if (it.name !== name) return false;
+          if (itStorage !== storage) return false;
+          if (itUnit !== (unit || "")) return false;
+
+          if (storage === "freezer") return true;
           const itShelf = typeof it.shelfLife === "number" ? it.shelfLife : 7;
           const itExp = calcExpiresAt(it.purchaseDate, itShelf);
-
-          return (
-            it.name === name &&
-            itStorage === storage &&
-            itUnit === (unit || "") &&
-            itExp === expiresAt
-          );
-        })
-        .sort(
-          (a, b) =>
-            getDaysLeft(a.it.purchaseDate, a.it.shelfLife, a.it.storage) -
-            getDaysLeft(b.it.purchaseDate, b.it.shelfLife, b.it.storage)
-        );
+          return itExp === expiresAt;
+        });
 
       if (candidates.length === 0) return list;
 
@@ -135,11 +174,18 @@ function FridgePanel({
   };
 
   const emptyEmoji =
-    storageFilter === "freezer" ? "❄️" : storageFilter === "fridge" ? "🧊" : "📦";
+    storageFilter === "freezer"
+      ? "❄️"
+      : storageFilter === "fridge"
+      ? "🧊"
+      : storageFilter === "pantry"
+      ? "🏠"
+      : storageFilter === "condiment"
+      ? "🧂"
+      : "📦";
 
   return (
     <div
-      ref={setDropRef}
       className={`bg-white rounded-lg shadow-lg p-6 transition ${
         isOver ? "ring-2 ring-blue-300" : ""
       }`}
@@ -153,47 +199,48 @@ function FridgePanel({
         <button
           onClick={onBack}
           className="text-blue-600 hover:text-blue-700 flex items-center gap-1 text-sm transition"
+          type="button"
         >
           <Plus size={16} />
           添加
         </button>
       </div>
 
-      {aggregated.length === 0 ? (
-        <div className="text-center py-12 text-gray-400">
-          <div className="text-4xl mb-2">{emptyEmoji}</div>
-          <p>{title} 还没有食材</p>
-          <button
-            onClick={onBack}
-            className="mt-4 text-blue-600 hover:text-blue-700 transition"
-          >
-            添加第一个食材 →
-          </button>
-        </div>
-      ) : (
-        <>
-          <div className="space-y-3 max-h-[600px] overflow-y-auto">
-            {aggregated
-              .slice()
-              .sort(
-                (a, b) =>
-                  getDaysLeft(a.purchaseDate, a.shelfLife, a.storage) -
-                  getDaysLeft(b.purchaseDate, b.shelfLife, b.storage)
-              )
-              .map((item) => (
+      {/* ✅ dropZone 覆盖空白区域，保证拖到空白也能接住 */}
+      <div ref={setDropRef} className="min-h-[520px] rounded-xl">
+        {aggregated.length === 0 ? (
+          <div className="text-center py-12 text-gray-400">
+            <div className="text-4xl mb-2">{emptyEmoji}</div>
+            <p>{title} 还没有食材</p>
+            <button
+              onClick={onBack}
+              className="mt-4 text-blue-600 hover:text-blue-700 transition"
+              type="button"
+            >
+              添加第一个食材 →
+            </button>
+          </div>
+        ) : (
+          <>
+            <div className="space-y-3 max-h-[600px] overflow-y-auto pr-1">
+              {aggregated.map((item) => (
                 <IngredientCard
-                  key={item._aggKey || `${item.storage}__${item.name}__${item.unit}__${item._expiresAt}`}
+                  key={
+                    item._aggKey ||
+                    `${item.storage}__${item.name}__${item.unit}__${item._expiresAt}`
+                  }
                   item={item}
                   onUpdateAmount={updateAmount}
                 />
               ))}
-          </div>
+            </div>
 
-          <div className="text-xs text-gray-400 mt-3">
-            提示：请从卡片左侧「⋮⋮」把手拖动。
-          </div>
-        </>
-      )}
+            <div className="text-xs text-gray-400 mt-3">
+              提示：请从卡片左侧「⋮⋮」把手拖动。
+            </div>
+          </>
+        )}
+      </div>
     </div>
   );
 }

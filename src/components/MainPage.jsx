@@ -1,233 +1,391 @@
-import React from 'react';
-import { TrendingUp } from 'lucide-react';
-import FridgePanel from './FridgePanel';
-import RecipePanel from './RecipePanel';
-import { getDaysLeft, getTodayDate } from '../utils/dateUtils';
-import { DndContext } from '@dnd-kit/core';
+import React, { useMemo, useState } from "react";
+import { DndContext, DragOverlay } from "@dnd-kit/core";
+import FridgePanel from "./FridgePanel";
+import IngredientCard from "./IngredientCard";
+import RecipePanel from "./RecipePanel";
+import { getTodayDate } from "../utils/dateUtils";
 
 function calcExpiresAt(purchaseDate, shelfLife) {
-  if (!purchaseDate || typeof shelfLife !== 'number') return '';
+  if (!purchaseDate || typeof shelfLife !== "number") return "";
   const d = new Date(purchaseDate);
-  if (Number.isNaN(d.getTime())) return '';
+  if (Number.isNaN(d.getTime())) return "";
   d.setDate(d.getDate() + shelfLife);
-  return d.toISOString().split('T')[0];
+  return d.toISOString().split("T")[0];
 }
 
-function MainPage({ ingredients, setIngredients, preferences, onBack, onClearFridge }) {
-  const handleDragEnd = (event) => {
-    const { active, over } = event;
-    if (!over) return;
+function normStorage(s) {
+  if (!s) return "fridge";
+  if (s === "room") return "pantry";
+  return s;
+}
 
-    const toStorage = over.id; // 'fridge' | 'freezer'
-    const data = active.data?.current;
+function normalizeIngredient(it) {
+  const storage = normStorage(it.storage || "fridge");
+  return {
+    ...it,
+    purchaseDate: it.purchaseDate ?? it.purchase_date,
+    shelfLife: typeof it.shelfLife === "number" ? it.shelfLife : it.shelf_life,
+    storage,
+    unit: it.unit || "个",
+    amount: Number(it.amount || 0),
+  };
+}
+
+function consumeFromList(
+  list,
+  { name, unit, fromStorage, expiresAt, qty, matchExpiresAt }
+) {
+  const next = [...list];
+  let need = qty;
+
+  for (let i = 0; i < next.length && need > 0; i++) {
+    const it = next[i];
+    const itStorage = normStorage(it.storage || "fridge");
+    if (itStorage !== fromStorage) continue;
+    if (it.name !== name) continue;
+    if ((it.unit || "") !== (unit || "")) continue;
+
+    if (matchExpiresAt) {
+      const itShelf = typeof it.shelfLife === "number" ? it.shelfLife : 7;
+      const itExp = calcExpiresAt(it.purchaseDate, itShelf);
+      if (itExp !== expiresAt) continue;
+    }
+
+    const cur = Number(it.amount || 0);
+    if (cur <= 0) continue;
+
+    const take = Math.min(cur, need);
+    const left = cur - take;
+
+    if (left <= 0) {
+      next.splice(i, 1);
+      i -= 1;
+    } else {
+      next[i] = { ...it, amount: left };
+    }
+
+    need -= take;
+  }
+
+  return { nextList: next, removedQty: qty - need };
+}
+
+export default function MainPage({
+  ingredients,
+  setIngredients,
+  preferences,
+  onClearFridge,
+  onAddToStorage,
+}) {
+  const list = useMemo(
+    () => (ingredients || []).map(normalizeIngredient),
+    [ingredients]
+  );
+
+  const [activeAggItem, setActiveAggItem] = useState(null);
+
+  const [moveModal, setMoveModal] = useState({
+    open: false,
+    max: 1,
+    value: 1,
+    payload: null,
+  });
+
+  const closeModal = () =>
+    setMoveModal({ open: false, max: 1, value: 1, payload: null });
+
+  const handleDragStart = (event) => {
+    const data = event?.active?.data?.current;
     if (!data) return;
 
-    const { name, unit, fromStorage, amount: aggAmount, expiresAt } = data;
+    const rep = list.find((it) => {
+      const itStorage = normStorage(it.storage || "fridge");
+      if (it.name !== data.name) return false;
+      if ((it.unit || "") !== (data.unit || "")) return false;
+      if (itStorage !== data.fromStorage) return false;
 
-    if (!name || !fromStorage) return;
-    if (toStorage === fromStorage) return;
-    if (toStorage !== 'fridge' && toStorage !== 'freezer') return;
+      if (data.fromStorage === "freezer") return true;
 
-    // ✅ 询问移动多少（默认 1）
-    const maxMove = Math.max(1, Number(aggAmount) || 1);
-    const raw = window.prompt(`要移动多少数量？(1 ~ ${maxMove})`, '1');
-    if (raw === null) return;
-    const parsed = parseInt(raw, 10);
-    if (!Number.isFinite(parsed) || parsed < 1) return;
-    const moveN = Math.min(parsed, maxMove);
+      const itShelf = typeof it.shelfLife === "number" ? it.shelfLife : 7;
+      const itExp = calcExpiresAt(it.purchaseDate, itShelf);
+      return itExp === data.expiresAt;
+    });
+
+    setActiveAggItem(
+      rep
+        ? { ...rep, amount: data.amount, _expiresAt: data.expiresAt }
+        : {
+            id: "overlay",
+            name: data.name,
+            unit: data.unit,
+            storage: data.fromStorage,
+            amount: data.amount,
+            purchaseDate: getTodayDate(),
+            shelfLife: data.fromStorage === "freezer" ? 9999 : 7,
+            _expiresAt: data.expiresAt,
+          }
+    );
+  };
+
+  const handleDragCancel = () => {
+    setActiveAggItem(null);
+    closeModal();
+  };
+
+  const handleDragEnd = (event) => {
+    const { active, over } = event;
+    setActiveAggItem(null);
+
+    if (!over) return;
+
+    const toStorage = over.id;
+    const ALLOWED = new Set(["fridge", "freezer", "pantry", "condiment"]);
+    if (!ALLOWED.has(toStorage)) return;
+
+    const data = active?.data?.current;
+    if (!data) return;
+
+    const { name, unit, fromStorage, amount, expiresAt } = data;
+    if (!name || !fromStorage || fromStorage === toStorage) return;
+
+    const max = Math.max(1, Number(amount || 1));
+
+    setMoveModal({
+      open: true,
+      max,
+      value: max,
+      payload: {
+        toStorage,
+        data: { name, unit, fromStorage, expiresAt, total: max },
+      },
+    });
+  };
+
+  const confirmMove = () => {
+    const payload = moveModal.payload;
+    if (!payload) return;
+
+    const qty = Math.max(
+      1,
+      Math.min(moveModal.max, Number(moveModal.value || 1))
+    );
+    const { toStorage, data } = payload;
+    const { name, unit, fromStorage, expiresAt } = data;
+
+    closeModal();
 
     setIngredients((prev) => {
-      const todayStr = getTodayDate();
-      const today = new Date(todayStr);
-      const list = [...prev];
+      const base = (prev || []).map(normalizeIngredient);
 
-      // ---- 从 fromStorage 扣掉 moveN：按 “name + unit + fromStorage + expiresAt(到期日)” 精准扣这一批 ----
-      let remainToRemove = moveN;
+      const matchExpiresAt = fromStorage !== "freezer";
 
-      const candidates = list
-        .map((it, idx) => ({ it, idx }))
-        .filter(({ it }) => {
-          const itStorage = it.storage || 'fridge';
-          const itUnit = it.unit || '';
-          const itShelf = typeof it.shelfLife === 'number' ? it.shelfLife : 7;
-          const itExp = calcExpiresAt(it.purchaseDate, itShelf);
+      const { nextList: afterConsume, removedQty } = consumeFromList(base, {
+        name,
+        unit,
+        fromStorage,
+        expiresAt,
+        qty,
+        matchExpiresAt,
+      });
 
-          return (
-            it.name === name &&
-            itUnit === (unit || '') &&
-            itStorage === fromStorage &&
-            itExp === expiresAt
-          );
-        })
-        .sort(
-          (a, b) =>
-            getDaysLeft(a.it.purchaseDate, a.it.shelfLife, a.it.storage) -
-            getDaysLeft(b.it.purchaseDate, b.it.shelfLife, b.it.storage)
-        );
+      if (removedQty <= 0) return prev;
 
-      for (const { it, idx } of candidates) {
-        if (remainToRemove <= 0) break;
+      const today = getTodayDate();
 
-        const cur = Number(it.amount) || 0;
-        if (cur <= 0) continue;
-
-        const take = Math.min(cur, remainToRemove);
-        const left = cur - take;
-
-        if (left <= 0) list[idx] = null;
-        else list[idx] = { ...it, amount: left };
-
-        remainToRemove -= take;
-      }
-
-      const cleaned = list.filter(Boolean);
-
-      // ---- 往 toStorage 加 moveN ----
-      if (toStorage === 'freezer') {
-        // fridge -> freezer：
-        // 你现在 freezer 显示“冷冻保存”，所以我们只需要把这批移动过去即可（作为一个新记录）
-        // baseShelfLife 推断：从同批次里随便拿一条
-        const sample = candidates[0]?.it;
-        const baseShelfLife =
-          sample && typeof sample.baseShelfLife === 'number'
-            ? sample.baseShelfLife
-            : sample && typeof sample.shelfLife === 'number'
-            ? sample.shelfLife
-            : 7;
-
-        cleaned.push({
+      let newItem;
+      if (fromStorage === "freezer" && toStorage === "fridge") {
+        newItem = {
           id: Date.now() + Math.random(),
           name,
-          amount: moveN,
-          unit: unit || '个',
-          storage: 'freezer',
-          baseShelfLife,
-          shelfLife: baseShelfLife + 90, // 占位：freezer 不显示 daysLeft
-          purchaseDate: todayStr,
-        });
+          unit: unit || "个",
+          amount: removedQty,
+          storage: "fridge",
+          purchaseDate: today,
+          shelfLife: 2,
+        };
       } else {
-        // freezer -> fridge：解冻后固定剩 2 天
-        // baseShelfLife 推断：从 freezer 里同批次拿一条
-        const sample = candidates[0]?.it;
-        const baseShelfLife =
-          sample && typeof sample.baseShelfLife === 'number'
-            ? sample.baseShelfLife
-            : sample && typeof sample.shelfLife === 'number'
-            ? Math.max(1, sample.shelfLife - 90)
-            : 7;
+        const rep = base.find((it) => {
+          const s = normStorage(it.storage || "fridge");
+          if (s !== fromStorage) return false;
+          if (it.name !== name) return false;
+          if ((it.unit || "") !== (unit || "")) return false;
+          if (!matchExpiresAt) return true;
 
-        const purchase = new Date(today);
-        purchase.setDate(purchase.getDate() - (baseShelfLife - 2));
-        const purchaseDate2DaysLeft = purchase.toISOString().split('T')[0];
+          const itShelf = typeof it.shelfLife === "number" ? it.shelfLife : 7;
+          const itExp = calcExpiresAt(it.purchaseDate, itShelf);
+          return itExp === expiresAt;
+        });
 
-        cleaned.push({
+        newItem = {
           id: Date.now() + Math.random(),
           name,
-          amount: moveN,
-          unit: unit || '个',
-          storage: 'fridge',
-          baseShelfLife,
-          shelfLife: baseShelfLife,
-          purchaseDate: purchaseDate2DaysLeft,
-        });
+          unit: unit || rep?.unit || "个",
+          amount: removedQty,
+          storage: toStorage,
+          purchaseDate: rep?.purchaseDate || today,
+          shelfLife:
+            toStorage === "freezer"
+              ? 9999
+              : typeof rep?.shelfLife === "number"
+              ? rep.shelfLife
+              : 7,
+        };
       }
 
-      return cleaned;
+      return [...afterConsume, newItem];
     });
   };
 
   return (
-    <DndContext onDragEnd={handleDragEnd}>
-      <div className="min-h-screen bg-gray-50">
-        <div className="bg-white shadow-sm border-b">
-          <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
-            <h1 className="text-2xl font-bold text-gray-800">🧊 我的冰箱</h1>
-
-            <div className="flex items-center gap-4 text-sm">
-              <button className="text-gray-600 hover:text-gray-800 transition">设置</button>
-              <button className="text-gray-600 hover:text-gray-800 transition">统计</button>
-
-              <button
-                className="px-3 py-1.5 rounded-md border border-red-300 text-red-600 hover:bg-red-50 transition"
-                onClick={() => {
-                  if (!onClearFridge) return;
-                  const ok = window.confirm('确定要清空冰箱里的所有食材吗？此操作不可撤销。');
-                  if (ok) onClearFridge();
-                }}
-              >
-                清空冰箱
-              </button>
+    <div className="min-h-screen bg-gray-50 p-6 pb-24">
+      <div className="max-w-7xl mx-auto">
+        <div className="flex items-center justify-between gap-3 mb-6">
+          <div>
+            <div className="text-2xl font-black text-gray-900">🧊 冰箱托管</div>
+            <div className="text-sm text-gray-500 mt-1">
+              四个板块：冷藏 / 冷冻 / 常温 / 调味料（支持拖拽与加减）
             </div>
           </div>
+
+          <button
+            onClick={onClearFridge}
+            className="px-4 py-2 rounded-xl bg-white border border-gray-200 text-gray-700 font-bold text-sm hover:bg-gray-50 transition"
+            type="button"
+          >
+            清空
+          </button>
         </div>
 
-        <div className="max-w-7xl mx-auto p-6">
-          <div className="space-y-6">
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <DndContext
+          onDragStart={handleDragStart}
+          onDragCancel={handleDragCancel}
+          onDragEnd={handleDragEnd}
+        >
+          <div className="w-full overflow-x-auto">
+            <div className="grid grid-cols-4 gap-4 min-w-[1100px]">
               <FridgePanel
-                title="🧊 冷藏（可拖到右侧冷冻）"
+                title="🧊 冷藏"
                 storageFilter="fridge"
-                ingredients={ingredients}
+                ingredients={list}
                 setIngredients={setIngredients}
-                onBack={onBack}
+                onBack={() => onAddToStorage?.("fridge")}
               />
-
               <FridgePanel
-                title="❄️ 冷冻（可拖到左侧冷藏）"
+                title="❄️ 冷冻"
                 storageFilter="freezer"
-                ingredients={ingredients}
+                ingredients={list}
                 setIngredients={setIngredients}
-                onBack={onBack}
+                onBack={() => onAddToStorage?.("freezer")}
+              />
+              <FridgePanel
+                title="🏠 常温"
+                storageFilter="pantry"
+                ingredients={list}
+                setIngredients={setIngredients}
+                onBack={() => onAddToStorage?.("pantry")}
+              />
+              <FridgePanel
+                title="🧂 调味料"
+                storageFilter="condiment"
+                ingredients={list}
+                setIngredients={setIngredients}
+                onBack={() => onAddToStorage?.("condiment")}
               />
             </div>
-
-            <RecipePanel
-              ingredients={ingredients}
-              setIngredients={setIngredients}
-              preferences={preferences}
-            />
           </div>
 
-          {ingredients.length > 0 && (
-            <div className="mt-6 bg-white rounded-lg shadow-lg p-6">
-              <h3 className="font-bold mb-4 flex items-center gap-2">
-                <TrendingUp className="text-purple-600" />
-                快速统计
-              </h3>
+          <DragOverlay dropAnimation={null}>
+            {activeAggItem ? (
+              <div className="pointer-events-none">
+                <IngredientCard item={activeAggItem} isOverlay />
+              </div>
+            ) : null}
+          </DragOverlay>
+        </DndContext>
 
-              <div className="grid grid-cols-3 gap-6">
-                <div className="text-center">
-                  <div className="text-3xl font-bold text-blue-600">{ingredients.length}</div>
-                  <div className="text-sm text-gray-600 mt-1">当前记录数</div>
-                </div>
+        {/* ✅ 恢复：下面的菜谱区 */}
+        <div className="mt-8">
+          <RecipePanel
+            ingredients={list}
+            setIngredients={setIngredients}
+            preferences={preferences}
+          />
+        </div>
 
-                <div className="text-center">
-                  <div className="text-3xl font-bold text-red-600">
-                    {ingredients.filter(i => getDaysLeft(i.purchaseDate, i.shelfLife, i.storage) <= 3).length}
-                  </div>
-                  <div className="text-sm text-gray-600 mt-1">即将过期记录</div>
-                </div>
-
-                <div className="text-center">
-                  <div className="text-3xl font-bold text-green-600">
-                    {ingredients.filter(i =>
-                      (i.storage || 'fridge') !== 'freezer' &&
-                      getDaysLeft(i.purchaseDate, i.shelfLife, i.storage) > 7
-                    ).length}
-                  </div>
-                  <div className="text-sm text-gray-600 mt-1">新鲜记录</div>
-                </div>
+        {/* ✅ 移动数量弹窗 */}
+        {moveModal.open && (
+          <div className="fixed inset-0 z-[10000] flex items-center justify-center">
+            <div
+              className="absolute inset-0 bg-black/30"
+              onClick={closeModal}
+            />
+            <div className="relative w-[360px] max-w-[92vw] bg-white rounded-2xl shadow-2xl border border-gray-100 p-6">
+              <div className="text-lg font-black text-gray-900">移动数量</div>
+              <div className="text-sm text-gray-500 mt-1">
+                请输入要移动的数量（1 ~ {moveModal.max}）
               </div>
 
-              <div className="text-xs text-gray-400 mt-3">
-                合并展示按 “同名 + 同单位 + 同存储 + 同到期日(expiresAt)” 进行；因此解冻回冷藏（剩 2 天）不会与原冷藏（剩 7 天）合并。
+              <div className="mt-5 flex items-center justify-center gap-3">
+                <button
+                  type="button"
+                  className="w-10 h-10 rounded-xl bg-gray-100 hover:bg-gray-200 font-black text-lg"
+                  onClick={() =>
+                    setMoveModal((s) => ({
+                      ...s,
+                      value: Math.max(1, Number(s.value || 1) - 1),
+                    }))
+                  }
+                >
+                  −
+                </button>
+
+                <input
+                  className="w-20 h-10 text-center rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none font-black text-base"
+                  value={moveModal.value}
+                  onChange={(e) => {
+                    const v = Number(e.target.value);
+                    if (!Number.isFinite(v)) return;
+                    setMoveModal((s) => ({
+                      ...s,
+                      value: Math.max(1, Math.min(s.max, v)),
+                    }));
+                  }}
+                />
+
+                <button
+                  type="button"
+                  className="w-10 h-10 rounded-xl bg-gray-100 hover:bg-gray-200 font-black text-lg"
+                  onClick={() =>
+                    setMoveModal((s) => ({
+                      ...s,
+                      value: Math.min(s.max, Number(s.value || 1) + 1),
+                    }))
+                  }
+                >
+                  +
+                </button>
+              </div>
+
+              <div className="mt-5 flex gap-2">
+                <button
+                  type="button"
+                  className="flex-1 h-10 rounded-xl bg-white border border-gray-200 hover:bg-gray-50 font-bold"
+                  onClick={closeModal}
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  className="flex-1 h-10 rounded-xl bg-gray-900 hover:bg-black text-white font-black"
+                  onClick={confirmMove}
+                >
+                  确认移动
+                </button>
               </div>
             </div>
-          )}
-        </div>
+          </div>
+        )}
       </div>
-    </DndContext>
+    </div>
   );
 }
-
-export default MainPage;

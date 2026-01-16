@@ -11,10 +11,11 @@ function calcExpiresAt(purchaseDate, shelfLife) {
   return d.toISOString().split("T")[0];
 }
 
-function IngredientCard({ item, onUpdateAmount }) {
+function IngredientCard({ item, onUpdateAmount, isOverlay = false }) {
   const name = item?.name ?? "";
   const unit = item?.unit ?? "个";
-  const storage = item?.storage ?? "fridge";
+  const storageRaw = item?.storage ?? "fridge";
+  const storage = storageRaw === "room" ? "pantry" : storageRaw;
   const amount = Number(item?.amount ?? 0);
   const shelfLife = Number(item?.shelfLife ?? 0);
   const purchaseDate = item?.purchaseDate ?? "";
@@ -22,13 +23,13 @@ function IngredientCard({ item, onUpdateAmount }) {
   const daysLeft = getDaysLeft(purchaseDate, shelfLife, storage);
   const statusColor = getStatusColor(daysLeft, storage);
 
-  const expiresAt =
-    item?._expiresAt || calcExpiresAt(purchaseDate, shelfLife);
+  const expiresAt = item?._expiresAt || calcExpiresAt(purchaseDate, shelfLife);
 
   const getStorageIcon = (s) => {
     if (s === "freezer") return "❄️";
     if (s === "fridge") return "🧊";
-    if (s === "room") return "📦";
+    if (s === "pantry") return "🏠";
+    if (s === "condiment") return "🧂";
     return "📦";
   };
 
@@ -39,20 +40,27 @@ function IngredientCard({ item, onUpdateAmount }) {
     return "已过期";
   };
 
-  // ✅ draggable id：必须唯一到“批次”
   const dragId = `${name}__${storage}__${unit}__${expiresAt}`;
 
-  const { attributes, listeners, setNodeRef, transform, isDragging, setActivatorNodeRef } =
-    useDraggable({
-      id: dragId,
-      data: {
-        name,
-        unit,
-        fromStorage: storage,
-        amount, // 聚合后的数量
-        expiresAt, // ✅ 关键：用到期日作为批次标识
-      },
-    });
+  const draggable = !isOverlay
+    ? useDraggable({
+        id: dragId,
+        data: {
+          name,
+          unit,
+          fromStorage: storage,
+          amount,
+          expiresAt,
+        },
+      })
+    : null;
+
+  const attributes = draggable?.attributes;
+  const listeners = draggable?.listeners;
+  const setNodeRef = draggable?.setNodeRef;
+  const transform = draggable?.transform;
+  const isDragging = draggable?.isDragging;
+  const setActivatorNodeRef = draggable?.setActivatorNodeRef;
 
   const style = {
     transform: transform
@@ -66,55 +74,66 @@ function IngredientCard({ item, onUpdateAmount }) {
     <div
       ref={setNodeRef}
       style={style}
-      className={`p-4 rounded-lg border-2 ${statusColor} select-none`}
+      className={[
+        "px-2.5 py-2 rounded-xl border-2 select-none",
+        statusColor,
+        isOverlay ? "shadow-2xl" : "",
+      ].join(" ")}
     >
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-3 min-w-0">
-          <button
-            ref={setActivatorNodeRef}
-            {...listeners}
-            {...attributes}
-            className="w-10 h-10 rounded-lg bg-white/60 hover:bg-white/80 flex items-center justify-center cursor-grab active:cursor-grabbing"
-            title="拖拽移动"
-            type="button"
-          >
-            <GripVertical size={18} />
-          </button>
+      <div className="flex items-center gap-2">
+        <button
+          ref={setActivatorNodeRef}
+          {...listeners}
+          {...attributes}
+          className={[
+            "w-7 h-7 rounded-lg bg-white/60 hover:bg-white/80 flex items-center justify-center",
+            isOverlay ? "cursor-grabbing" : "cursor-grab active:cursor-grabbing",
+          ].join(" ")}
+          title="拖拽移动"
+          type="button"
+          disabled={isOverlay}
+        >
+          <GripVertical size={14} />
+        </button>
 
-          <div className="text-xl">{getStorageIcon(storage)}</div>
+        <div className="text-base leading-none">{getStorageIcon(storage)}</div>
 
-          <div className="min-w-0">
-            <div className="font-semibold truncate">{name || "（未命名）"}</div>
-            <div className="text-sm opacity-75">
-              {getDaysText(daysLeft, storage)}
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-sm font-semibold truncate">
+              {name || "（未命名）"}
             </div>
+
+            <div className="text-sm font-black whitespace-nowrap">
+              {amount}
+              <span className="text-[11px] font-semibold opacity-70 ml-1">
+                {unit}
+              </span>
+            </div>
+          </div>
+
+          <div className="text-[11px] opacity-75 truncate">
+            {getDaysText(daysLeft, storage)}
           </div>
         </div>
 
-        <div className="flex items-center gap-3">
-          <div className="text-right leading-tight">
-            <div className="font-bold text-lg">{amount}</div>
-            <div className="text-xs opacity-70">{unit}</div>
-          </div>
-
-          <div className="flex flex-col gap-2">
-            <button
-              onClick={() => onUpdateAmount(item, 1)}
-              className="w-10 h-10 rounded-lg bg-white/60 hover:bg-white/80 flex items-center justify-center transition"
-              type="button"
-              title="补充"
-            >
-              <Plus size={18} />
-            </button>
-            <button
-              onClick={() => onUpdateAmount(item, -1)}
-              className="w-10 h-10 rounded-lg bg-white/60 hover:bg-white/80 flex items-center justify-center transition"
-              type="button"
-              title="用了"
-            >
-              <Minus size={18} />
-            </button>
-          </div>
+        <div className="flex items-center gap-1">
+          <button
+            onClick={() => onUpdateAmount?.(item, 1)}
+            className="w-8 h-8 rounded-lg bg-white/60 hover:bg-white/80 flex items-center justify-center"
+            type="button"
+            title="补充"
+          >
+            <Plus size={14} />
+          </button>
+          <button
+            onClick={() => onUpdateAmount?.(item, -1)}
+            className="w-8 h-8 rounded-lg bg-white/60 hover:bg-white/80 flex items-center justify-center"
+            type="button"
+            title="用了"
+          >
+            <Minus size={14} />
+          </button>
         </div>
       </div>
     </div>
